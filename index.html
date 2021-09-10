@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Document</title>
+  <style>
+    video {
+      height: 100%;
+      width: 100%;
+    }
+    .wrap {
+      display: flex;
+      flex-wrap: wrap;
+    }
+    .wrap > div {
+      width: 25%;
+      height: 250px;
+      background-color: #000;
+      margin: 0.5rem 0.5rem 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>聊天室</h1>
+  <button id="camera">視訊鏡頭</button>
+  <button id="screen">分享螢幕</button>
+  <button id="close">關閉分享</button>
+  <input id="textInput" type="text">
+  <button id="submit">送出訊息</button>
+  <input id="fileInput" type="file">
+
+  <div class="wrap">
+    <div>
+      <video id="video" autoplay></video>
+    </div>
+  </div>
+
+<script>
+let cameraStream
+let screenStream
+
+const video = document.querySelector('#video')
+const cameraBtn = document.querySelector('#camera')
+const screenBtn = document.querySelector('#screen')
+const closeBtn = document.querySelector('#close')
+const textInput = document.querySelector('#textInput')
+const submitBtn = document.querySelector('#submit')
+const fileInput = document.querySelector('#fileInput')
+
+// mediaDevices 的設定
+const constraints = { audio: true, video: true }
+// offer 的設定
+const offerOptions = { offerToReceiveAudio: true,  offerToReceiveVideo: true }
+
+cameraBtn.addEventListener('click', () => {
+  if (cameraStream) return
+  // 取得視訊鏡頭的 stream
+  navigator.mediaDevices.getUserMedia(constraints).then(stream => {
+    // 將本來螢幕分享的 stream 清除
+    if (screenStream) {
+      screenStream.getTracks().forEach(track => {
+        track.stop()
+      })
+      screenStream = null
+    }
+    // 設定視訊鏡頭的 stream 到畫面
+    cameraStream = stream
+    video.srcObject = stream
+
+    userList.forEach(user => {
+      if (!user.peer) return
+      // peer 移除之前的 stream
+      user.peer.getSenders().forEach(sender => {
+        user.peer.removeTrack(sender)
+      })
+      // peer 新增新的 stream
+      stream.getTracks().forEach(track => {
+        user.peer.addTrack(track, stream)
+      })
+    })
+  })
+})
+
+screenBtn.addEventListener('click', () => {
+  if (screenStream) return
+  // 取得螢幕分享 stream
+  navigator.mediaDevices.getDisplayMedia(constraints).then(stream => {
+    if (cameraStream) {
+      // 將本來視訊鏡頭的 stream 清除
+      cameraStream.getTracks().forEach(track => {
+        track.stop()
+      })
+      cameraStream = null
+    }
+    // 設定螢幕分享的 stream 到畫面
+    screenStream = stream
+    video.srcObject = stream
+
+    userList.forEach(user => {
+      if (!user.peer) return
+      // peer 移除之前的 stream
+      user.peer.getSenders().forEach(sender => {
+        user.peer.removeTrack(sender)
+      })
+      // peer 新增新的 stream
+      stream.getTracks().forEach(track => {
+        user.peer.addTrack(track, stream)
+      })
+    })
+  })
+})
+
+closeBtn.addEventListener('click', () => {
+  if (screenStream) {
+    // 將螢幕分享的 stream 清除
+    screenStream.getTracks().forEach(track => {
+      track.stop()
+    })
+    screenStream = null
+  }
+  if (cameraStream) {
+    // 將視訊鏡頭的 stream 清除
+    cameraStream.getTracks().forEach(track => {
+      track.stop()
+    })
+    cameraStream = null
+  }
+
+  // 所有的 peer 移除之前的 stream
+  userList.forEach(user => {
+    user.peer.getSenders().forEach(sender => {
+      user.peer.removeTrack(sender)
+    })
+  })
+})
+
+submitBtn.addEventListener('click', () => {
+  const value = textInput.value
+  if (!value) return
+  // 所有的 peer 送出文字訊息
+  userList.forEach(user => {
+    if (!user.channel) return
+    user.channel.send(value)
+  })
+})
+
+fileInput.addEventListener('change', e => {
+  const file = e.target.files[0]
+  if (!file) return
+  // 這邊設定僅接受 jpeg 格式
+  if (file.type !== 'image/jpeg') return
+  // 將檔案轉換成 ArrayBuffer
+  const reader = new FileReader()
+  reader.readAsArrayBuffer(file)
+  reader.onload = e => {
+    // 所有的 peer 送出 ArrayBuffer
+    userList.forEach(user => {
+      if (!user.channel) return
+      user.channel.send(e.target.result)
+    })
+  }
+})
+
+// 自己的 ID
+let myId
+// 所有人員的清單
+let userList = []
+
+function init() {
+  // 建立 WebSocket 連線
+  const ws = new WebSocket('ws://localhost:3000/connection')
+
+  // 收到訊息觸發該事件
+  ws.addEventListener('message', async e => {
+    // 轉換字串訊息為物件
+    const data = JSON.parse(e.data)
+
+    // 找到送出訊息的人（init 以外使用）
+    const sender = userList.find(user => user.id === data.sender)
+
+    // 第一次開啟 WebSocket 連線時觸發
+    if (data.event === 'init') {
+      // 設定自己的 ID
+      myId = data.id
+      // 設定所有人員的清單
+      userList = data.userList.map(id => ({ id, peer: null, channel: null }))
+      // 對所有人員發起連線
+      userList.forEach(async user => {
+        user.peer = new RTCPeerConnection()
+        user.peer.addEventListener('icecandidate', e => {
+          // 傳送連接埠資訊
+          ws.send(JSON.stringify({
+            event: 'candidate',
+            sender: myId,
+            taker: user.id,
+            candidate: e.candidate 
+          }))
+        })
+        user.peer.addEventListener('connectionstatechange', e => {
+          const currentVideo = document.querySelector(`#video_${user.id} > video`)
+          if (currentVideo) return
+          // 初始化畫面 video
+          const div = document.createElement('div')
+          div.id = `video_${user.id}`
+          const video = document.createElement('video')
+          video.autoplay = true
+          div.appendChild(video)
+          const wrap = document.querySelector('.wrap')
+          wrap.appendChild(div)
+        })
+        user.peer.addEventListener('track', e => {
+          // 將 stream 顯示於畫面
+          const currentVideo = document.querySelector(`#video_${user.id} > video`)
+          currentVideo.srcObject = e.streams[0]
+        })
+        user.peer.addEventListener('removestream', e => {
+          // 將 stream 從畫面移除
+          const currentVideo = document.querySelector(`#video_${user.id} > video`)
+          currentVideo.srcObject = null
+        })
+        user.peer.addEventListener('datachannel', e => {
+          // 將對方的 channel 寫入物件
+          user.channel = e.channel
+        })
+        user.peer.addEventListener('negotiationneeded', async e => {
+          // 連接尚未建立時不動作
+          if (user.peer.connectionState !== 'connected') return
+          // 重新發出請求並建立連線
+          const offer = await user.peer.createOffer(offerOptions)
+          await user.peer.setLocalDescription(offer)
+          ws.send(JSON.stringify({
+            event: 'request',
+            sender: myId,
+            taker: user.id,
+            connection: offer
+          }))
+        })
+        // 建立 DataChannel
+        channel = user.peer.createDataChannel('channel')
+        channel.addEventListener('message', e => {
+          if (typeof e.data === 'object') {
+            // 收到檔案時詢問後下載該檔案
+            const message = `是否下載 ${user.id} 提供的檔案？`
+            const result = confirm(message)
+            if (!result) return
+            const blob = new Blob([e.data], { type: 'image/jpeg' })
+            const downloadLink = document.createElement('a')
+            downloadLink.href = URL.createObjectURL(blob)
+            downloadLink.download = 'download'
+            downloadLink.click()
+            URL.revokeObjectURL(downloadLink.href)
+          } else {
+            // 收到文字時使用 alert 印出
+            const message = `${user.id}: ${e.data}`
+            alert(message)
+          }
+        })
+
+        if (cameraStream) {
+          // 將視訊鏡頭的 stream 加入 peer
+          cameraStream.getTracks().forEach(track => {
+            user.peer.addTrack(track, cameraStream)
+          })
+        }
+        if (screenStream) {
+          // 將螢幕分享的 stream 加入 peer
+          screenStream.getTracks().forEach(track => {
+            user.peer.addTrack(track, screenStream)
+          })
+        }
+
+        // 發出請求並建立連線
+        const offer = await user.peer.createOffer(offerOptions)
+        await user.peer.setLocalDescription(offer)
+        ws.send(JSON.stringify({
+          event: 'request',
+          sender: myId,
+          taker: user.id,
+          connection: offer
+        }))
+      })
+    }
+
+    // 收到別人發出的請求時觸發
+    if (data.event === 'request') {
+      if (!sender) {
+        // 新成員加入
+        // 建立該人員的資訊並放入清單
+        const user = { id: data.sender, peer: null, channel: null }
+        userList.push(user)
+        user.peer = new RTCPeerConnection()
+        user.peer.addEventListener('icecandidate', e => {
+          // 傳送連接埠資訊
+          ws.send(JSON.stringify({
+            event: 'candidate',
+            sender: myId,
+            taker: user.id,
+            candidate: e.candidate 
+          }))
+        })
+        user.peer.addEventListener('connectionstatechange', e => {
+          const currentVideo = document.querySelector(`#video_${user.id} > video`)
+          if (currentVideo) return
+          // 初始化畫面 video
+          const div = document.createElement('div')
+          div.id = `video_${user.id}`
+          const video = document.createElement('video')
+          video.autoplay = true
+          div.appendChild(video)
+          const wrap = document.querySelector('.wrap')
+          wrap.appendChild(div)
+        })
+        user.peer.addEventListener('track', e => {
+          // 將 stream 顯示於畫面
+          const currentVideo = document.querySelector(`#video_${user.id} > video`)
+          currentVideo.srcObject = e.streams[0]
+        })
+        user.peer.addEventListener('removestream', e => {
+          // 將 stream 從畫面移除
+          const currentVideo = document.querySelector(`#video_${user.id} > video`)
+          currentVideo.srcObject = null
+        })
+        user.peer.addEventListener('datachannel', e => {
+          // 將對方的 channel 寫入物件
+          user.channel = e.channel
+        })
+        user.peer.addEventListener('negotiationneeded', async e => {
+          // 連接尚未建立時不動作
+          if (user.peer.connectionState !== 'connected') return
+          // 重新發出請求並建立連線
+          const offer = await user.peer.createOffer(offerOptions)
+          await user.peer.setLocalDescription(offer)
+          ws.send(JSON.stringify({
+            event: 'request',
+            sender: myId,
+            taker: user.id,
+            connection: offer
+          }))
+        })
+        // 建立 DataChannel
+        channel = user.peer.createDataChannel('channel')
+        channel.addEventListener('message', e => {
+          if (typeof e.data === 'object') {
+            // 收到檔案時詢問後下載該檔案
+            const message = `是否下載 ${user.id} 提供的檔案？`
+            const result = confirm(message)
+            if (!result) return
+            const blob = new Blob([e.data], { type: 'image/jpeg' })
+            const downloadLink = document.createElement('a')
+            downloadLink.href = URL.createObjectURL(blob)
+            downloadLink.download = 'download'
+            downloadLink.click()
+            URL.revokeObjectURL(downloadLink.href)
+          } else {
+            // 收到文字時使用 alert 印出
+            const message = `${user.id}: ${e.data}`
+            alert(message)
+          }
+        })
+
+        if (cameraStream) {
+          // 將視訊鏡頭的 stream 加入 peer
+          cameraStream.getTracks().forEach(track => {
+            user.peer.addTrack(track, cameraStream)
+          })
+        }
+        if (screenStream) {
+          // 將螢幕分享的 stream 加入 peer
+          screenStream.getTracks().forEach(track => {
+            user.peer.addTrack(track, screenStream)
+          })
+        }
+
+        // 設定該 peer 的連線資訊並回覆自己的連線資訊
+        await user.peer.setRemoteDescription(data.connection)
+        const answer = await user.peer.createAnswer(offerOptions)
+        await user.peer.setLocalDescription(answer)
+        ws.send(JSON.stringify({
+          event: 'response',
+          sender: myId,
+          taker: user.id,
+          connection: answer
+        }))
+      } else {
+        // 設定該 peer 的連線資訊並回覆自己的連線資訊
+        await sender.peer.setRemoteDescription(data.connection)
+        const answer = await sender.peer.createAnswer(offerOptions)
+        await sender.peer.setLocalDescription(answer)
+        ws.send(JSON.stringify({
+          event: 'response',
+          sender: myId,
+          taker: sender.id,
+          connection: answer
+        }))
+      }
+    }
+
+    // 收到回覆時觸發
+    if (data.event === 'response') {
+      // 設定該 peer 的連線資訊
+      sender.peer.setRemoteDescription(data.connection)
+    }
+
+    // 有人傳送連接埠時觸發
+    if (data.event === 'candidate') {
+      // 設定該 peer 的連接埠
+      sender.peer.addIceCandidate(data.candidate)
+    }
+
+    // 有人離開時觸發
+    if (data.event === 'close') {
+      // 清單移除離開者
+      userList = userList.filter(user => user !== sender)
+      // 關閉該連線
+      sender.peer.close()
+      // 移除離開者的畫面
+      const videoDiv = document.querySelector(`#video_${data.sender}`)
+      if (videoDiv) videoDiv.remove()
+    }
+  })
+}
+
+// 初始化
+init()
+</script>
+</body>
+</html>
